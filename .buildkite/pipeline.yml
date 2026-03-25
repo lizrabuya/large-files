@@ -1,0 +1,4 @@
+
+steps:
+  - label: ":wave: Hello World"
+    command: echo "This is a test pipeline!"
