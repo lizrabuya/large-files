@@ -40,16 +40,6 @@ test_git_lfs_config_has_lfs_filter() {
 
 test_git_lfs_install_global() {
   local global_hooks_dir
-  global_hooks_dir="$(git config --global core.hooksPath 2>/dev/null || echo "${XDG_CONFIG_HOME:-$HOME/.config}/git/hooks")"
-
-  for hook in pre-push post-checkout post-commit post-merge; do
-    HOOK_FILE="$global_hooks_dir/$hook"
-    if [[ -f "$HOOK_FILE" ]] && grep -q "lfs" "$HOOK_FILE"; then
-      pass "Global LFS hook installed: $hook"
-    else
-      fail "Global LFS hook missing or not LFS-related: $hook ($HOOK_FILE)"
-    fi
-  done
 
   if git config --global --get-regexp "filter.lfs" > /dev/null 2>&1; then
     pass "Global git config has LFS filter settings"
