@@ -13,41 +13,12 @@ PASS=0
 FAIL=0
 ERRORS=()
 
-# --- Helpers -----------------------------------------------------------------
+# --- Logging Helpers -----------------------------------------------------------------
 pass() { echo "  ✅ PASS: $1"; ((++PASS)); }
 fail() { echo "  ❌ FAIL: $1"; ((++FAIL)); ERRORS+=("$1"); }
 section() { echo; echo "━━━ $1 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"; }
 
-# --- git lfs checkout tests ------------------------------------------------------
-test_git_lfs_install_local() {
-  for hook in pre-push post-checkout post-commit post-merge; do
-    HOOK_FILE=".git/hooks/$hook"
-    if [[ -f "$HOOK_FILE" ]] && grep -q "lfs" "$HOOK_FILE"; then
-      pass "LFS hook installed: $hook"
-    else
-      fail "LFS hook missing or not LFS-related: $hook"
-    fi
-  done
-}
-
-test_git_lfs_config_has_lfs_filter() {
-  if git config --local --get-regexp "filter.lfs" > /dev/null 2>&1; then
-    pass "Local git config has LFS filter settings"
-  else
-    fail "Local git config missing LFS filter settings"
-  fi
-}
-
-test_git_lfs_install_global() {
-  local global_hooks_dir
-
-  if git config --global --get-regexp "filter.lfs" > /dev/null 2>&1; then
-    pass "Global git config has LFS filter settings"
-  else
-    fail "Global git config missing LFS filter settings"
-  fi
-}
-
+# ---- test helpers ---------------------------------------------------------------
 test_git_lfs_fetch() {
   local args="${1:-}"
   if git lfs fetch $args > /dev/null 2>&1; then
@@ -79,6 +50,73 @@ integrity_check_lfs_objects() {
     fail "git lfs fsck --objects reported integrity issues"
   fi
 }
+
+test_git_lfs_checkout() {
+  # assume `git lfs checkout` was run successfully before this function is called
+
+  POINTER_COUNT=0
+  while IFS= read -r lfs_file; do
+    if [[ -f "$lfs_file" ]]; then
+      FIRST_LINE=$(head -1 "$lfs_file" 2>/dev/null || echo "")
+      if [[ "$FIRST_LINE" == "version https://git-lfs.github.com/spec/v1" ]]; then
+        fail "File is still an LFS pointer (not checked out): $lfs_file"
+        ((POINTER_COUNT++))
+      else
+        FILE_SIZE=$(stat -f%z "$lfs_file" 2>/dev/null || stat -c%s "$lfs_file" 2>/dev/null || echo 0)
+        pass "File checked out (${FILE_SIZE} bytes): $lfs_file"
+      fi
+    else
+      fail "Expected LFS file does not exist: $lfs_file"
+    fi
+  done < <(git lfs ls-files -n 2>/dev/null)
+
+  [[ "$POINTER_COUNT" -eq 0 ]] \
+    && pass "All LFS files fully checked out (no residual pointers)" \
+    || fail "$POINTER_COUNT file(s) still contain LFS pointers"
+
+  # 3.2 git lfs fsck — object integrity check
+  integrity_check_lfs_objects
+
+  # Check for any remaining LFS pointer files (simplified check)
+  if find . -type f -name "*.lfs" | grep -q .; then
+    fail "LFS pointer files remain after checkout"
+  else
+    pass "No LFS pointer files remain after checkout"
+  fi
+}
+
+test_git_lfs_install_local() {
+  for hook in pre-push post-checkout post-commit post-merge; do
+    HOOK_FILE=".git/hooks/$hook"
+    if [[ -f "$HOOK_FILE" ]] && grep -q "lfs" "$HOOK_FILE"; then
+      pass "LFS hook installed: $hook"
+    else
+      fail "LFS hook missing or not LFS-related: $hook"
+    fi
+  done
+}
+
+test_git_lfs_config_has_lfs_filter() {
+  if git config --local --get-regexp "filter.lfs" > /dev/null 2>&1; then
+    pass "Local git config has LFS filter settings"
+  else
+    fail "Local git config missing LFS filter settings"
+  fi
+}
+
+test_git_lfs_install_global() {
+  local global_hooks_dir
+
+  if git config --global --get-regexp "filter.lfs" > /dev/null 2>&1; then
+    pass "Global git config has LFS filter settings"
+  else
+    fail "Global git config missing LFS filter settings"
+  fi
+}
+
+# --- git lfs checkout tests ------------------------------------------------------
+
+
 
 test_git_lfs_fetch_recent() {
   # Configurable LFS recent fetch window (mirrors git-lfs defaults)
@@ -156,39 +194,7 @@ test_git_lfs_fetch_all() {
   integrity_check_lfs_objects
 }
 
-test_git_lfs_checkout() {
-  # assume `git lfs checkout` was run successfully before this function is called
-
-  POINTER_COUNT=0
-  while IFS= read -r lfs_file; do
-    if [[ -f "$lfs_file" ]]; then
-      FIRST_LINE=$(head -1 "$lfs_file" 2>/dev/null || echo "")
-      if [[ "$FIRST_LINE" == "version https://git-lfs.github.com/spec/v1" ]]; then
-        fail "File is still an LFS pointer (not checked out): $lfs_file"
-        ((POINTER_COUNT++))
-      else
-        FILE_SIZE=$(stat -f%z "$lfs_file" 2>/dev/null || stat -c%s "$lfs_file" 2>/dev/null || echo 0)
-        pass "File checked out (${FILE_SIZE} bytes): $lfs_file"
-      fi
-    else
-      fail "Expected LFS file does not exist: $lfs_file"
-    fi
-  done < <(git lfs ls-files -n 2>/dev/null)
-
-  [[ "$POINTER_COUNT" -eq 0 ]] \
-    && pass "All LFS files fully checked out (no residual pointers)" \
-    || fail "$POINTER_COUNT file(s) still contain LFS pointers"
-
-  # 3.2 git lfs fsck — object integrity check
-  integrity_check_lfs_objects
-
-  # Check for any remaining LFS pointer files (simplified check)
-  if find . -type f -name "*.lfs" | grep -q .; then
-    fail "LFS pointer files remain after checkout"
-  else
-    pass "No LFS pointer files remain after checkout"
-  fi
-}
+# --- individual test cases ------------------------------------------------------
 
 test_minimal_operation() {
   cat <<'EOF'
@@ -205,7 +211,7 @@ EOF
   test_git_lfs_checkout
 }
 
-test_fetch_checkout_get_all() {
+test_fetch_all_checkout() {
   cat <<'EOF'
 steps:
   - command: ...
@@ -221,7 +227,7 @@ EOF
   test_git_lfs_checkout
 }
 
-test_fetch_recent() {
+test_fetch_recent_checkout() {
   cat <<'EOF'
 steps:
   - command: ...
@@ -233,7 +239,7 @@ EOF
 
   test_git_lfs_install_local
   test_git_lfs_config_has_lfs_filter
-  test_git_lfs_fetch "--recent"
+  test_git_lfs_fetch_recent
   test_git_lfs_checkout
 }
 
