@@ -154,18 +154,15 @@ test_git_lfs_fetch_recent() {
 
   # 2.3 Every LFS pointer on each recent ref has a cached object on disk
   for ref in "${RECENT_REFS[@]}"; do
-    while IFS= read -r lfs_file; do
-      OID=$(git show "${ref}:${lfs_file}" 2>/dev/null \
-        | grep "^oid sha256:" | awk '{print $2}' | cut -d: -f2) || true
-      if [[ -z "$OID" ]]; then
-        fail "[$ref] Could not read LFS pointer OID for: $lfs_file"
-        continue
+    while IFS= read -r line; do
+      marker="${line:13:1}"   # '*' = cached, '-' = pointer only
+      lfs_file="${line:15}"
+      if [[ "$marker" == "*" ]]; then
+        pass "[$ref] LFS object cached: $lfs_file"
+      else
+        fail "[$ref] LFS object MISSING: $lfs_file"
       fi
-      OBJ_PATH=".git/lfs/objects/${OID:0:2}/${OID:2:2}/$OID"
-      [[ -f "$OBJ_PATH" ]] \
-        && pass "[$ref] LFS object cached for: $lfs_file (oid: ${OID:0:12}...)" \
-        || fail "[$ref] LFS object MISSING for: $lfs_file (oid: ${OID:0:12}...)"
-    done < <(git lfs ls-files -n --ref "$ref" 2>/dev/null)
+    done < <(git lfs ls-files --ref "$ref" 2>/dev/null)
   done
 
 }
