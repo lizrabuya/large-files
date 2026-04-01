@@ -57,8 +57,7 @@ test_git_lfs_checkout() {
   POINTER_COUNT=0
   while IFS= read -r lfs_file; do
     if [[ -f "$lfs_file" ]]; then
-      FIRST_LINE=$(head -1 "$lfs_file" 2>/dev/null || echo "")
-      if [[ "$FIRST_LINE" == "version https://git-lfs.github.com/spec/v1" ]]; then
+      if LC_ALL=C head -1 "$lfs_file" 2>/dev/null | grep -qF "version https://git-lfs.github.com/spec/v1"; then
         fail "File is still an LFS pointer (not checked out): $lfs_file"
         ((POINTER_COUNT++))
       else
@@ -157,7 +156,7 @@ test_git_lfs_fetch_recent() {
   for ref in "${RECENT_REFS[@]}"; do
     while IFS= read -r lfs_file; do
       OID=$(git show "${ref}:${lfs_file}" 2>/dev/null \
-        | grep "^oid sha256:" | awk '{print $2}' | cut -d: -f2)
+        | grep "^oid sha256:" | awk '{print $2}' | cut -d: -f2) || true
       if [[ -z "$OID" ]]; then
         fail "[$ref] Could not read LFS pointer OID for: $lfs_file"
         continue
