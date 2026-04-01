@@ -162,7 +162,7 @@ test_git_lfs_fetch_recent() {
       else
         fail "[$ref] LFS object MISSING: $lfs_file"
       fi
-    done < <(git lfs ls-files --ref "$ref" 2>/dev/null)
+    done < <(git lfs ls-files "$ref" 2>/dev/null)
   done
 
 }
