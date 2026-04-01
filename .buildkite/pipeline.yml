@@ -1,4 +1,69 @@
-
 steps:
-  - label: ":wave: Hello World"
-    command: echo "This is a test pipeline!"
+  - label: "test minimal/default git lfs operation"
+    command: ./test_git_lfs_checkout.sh . test_minimal_operation
+    plugins:
+      - improbable-eng/metahook#v0.4.1:
+          environment: |
+            buildkite-agent env set "GIT_LFS_SKIP_SMUDGE=1"
+          post-checkout: |
+            echo "--- git lfs fetch + git lfs checkout"
+            cd $${BUILDKITE_BUILD_CHECKOUT_PATH}
+            git lfs install --local
+            git lfs fetch origin "refs/remotes/origin/$${BUILDKITE_BRANCH}"
+            git lfs checkout
+
+  - label: "test git lfs fetch all"
+    command: ./test_git_lfs_checkout.sh . test_fetch_all_checkout
+    plugins:
+      - improbable-eng/metahook#v0.4.1:
+          environment: |
+            buildkite-agent env set "GIT_LFS_SKIP_SMUDGE=1"
+          post-checkout: |
+            echo "--- git lfs fetch + git lfs checkout"
+            cd $${BUILDKITE_BUILD_CHECKOUT_PATH}
+            git lfs install --local
+            git lfs fetch --all
+            git lfs checkout
+
+  - label: "test git lfs fetch recent"
+    command: git lfs version && ./test_git_lfs_checkout.sh . test_fetch_recent_checkout
+    plugins:
+      - improbable-eng/metahook#v0.4.1:
+          environment: |
+            buildkite-agent env set "GIT_LFS_SKIP_SMUDGE=1"
+          post-checkout: |
+            echo "--- git lfs fetch + git lfs checkout"
+            cd $${BUILDKITE_BUILD_CHECKOUT_PATH}
+            git lfs install --local
+            git lfs fetch --recent
+            git lfs checkout
+
+  - label: "test git lfs fetch with include and exclude filters"
+    command: ./test_git_lfs_checkout.sh . test_include_exclude_checkout
+    plugins:
+      - improbable-eng/metahook#v0.4.1:
+          environment: |
+            buildkite-agent env set "GIT_LFS_SKIP_SMUDGE=1"
+          post-checkout: |
+            echo "--- git lfs fetch + git lfs checkout"
+            cd $${BUILDKITE_BUILD_CHECKOUT_PATH}
+            git lfs install --local
+            git lfs fetch --include="bin/**" --exclude="src/**"
+            git lfs checkout
+
+
+  - label: "test install global scope and prune"
+    commands:  ./test_git_lfs_checkout.sh . test_global_install
+    plugins:
+      - improbable-eng/metahook#v0.4.1:
+          environment: |
+            buildkite-agent env set "GIT_LFS_SKIP_SMUDGE=1"
+          post-checkout: |
+            echo "--- git lfs fetch + git lfs checkout"
+            cd $${BUILDKITE_BUILD_CHECKOUT_PATH}
+            git lfs install
+            git lfs fetch origin "refs/remotes/origin/$${BUILDKITE_BRANCH}"
+            git lfs checkout
+          pre-exit: |
+            echo "--- git lfs prune"
+            git lfs prune

@@ -167,6 +167,58 @@ test_git_lfs_fetch_recent() {
 
 }
 
+test_git_lfs_fetch_include_exclude() {
+  # Assumes `git lfs fetch -I 'bin/**' -X 'src/**'` was run before this function.
+  # Verifies:
+  #   - LFS objects matching bin/**  are cached  (marker '*')
+  #   - LFS objects matching src/**  are NOT cached (marker '-')
+  #   - LFS objects matching test/** are NOT cached (marker '-')
+
+  local included_pat="bin/"
+  local excluded_pats=("src/" "test/")
+
+  local included=0 excluded_cached=0 excluded_ok=0
+
+  while IFS= read -r line; do
+    local marker="${line:11:1}"   # '*' = cached, '-' = pointer only
+    local lfs_file="${line:13}"
+
+    # Determine which bucket this file belongs to
+    local is_included=false
+    local is_excluded=false
+
+    [[ "$lfs_file" == ${included_pat}* ]] && is_included=true
+    for pat in "${excluded_pats[@]}"; do
+      [[ "$lfs_file" == ${pat}* ]] && is_excluded=true && break
+    done
+
+    if $is_included; then
+      ((++included))
+      if [[ "$marker" == "*" ]]; then
+        pass "bin/** object cached: $lfs_file"
+      else
+        fail "bin/** object NOT cached (should have been fetched): $lfs_file"
+      fi
+    elif $is_excluded; then
+      if [[ "$marker" == "-" ]]; then
+        ((++excluded_ok))
+        pass "excluded object correctly absent: $lfs_file"
+      else
+        ((++excluded_cached))
+        fail "excluded object was fetched but should not have been: $lfs_file"
+      fi
+    fi
+    # Files outside all patterns are not asserted either way
+  done < <(git lfs ls-files 2>/dev/null)
+
+  [[ "$included" -gt 0 ]] \
+    || fail "No bin/** LFS files found — check that the repo has LFS-tracked files under bin/"
+
+  [[ "$excluded_cached" -eq 0 ]] \
+    && pass "No excluded (src/**/test/**) objects were fetched" \
+    || fail "$excluded_cached excluded object(s) were unexpectedly fetched"
+}
+
 test_git_lfs_fetch_all() {
   # 1. assume `git lfs fetch --all` was run successfully before this function is called
   # 2. LFS object store must be non-empty
@@ -236,6 +288,23 @@ EOF
   test_git_lfs_install_local
   test_git_lfs_config_has_lfs_filter
   test_git_lfs_fetch_recent
+  test_git_lfs_checkout
+}
+
+test_git_lfs_fetch_include_exclude() {
+  cat <<'EOF'
+steps:
+  - command: ...
+    checkout:
+      lfs:
+        fetch: "-I 'bin/**' -X 'src/**'"
+    OR
+        fetch: "--include='bin/**' --exclude='src/**'"
+EOF
+  echo
+  test_git_lfs_install_local
+  test_git_lfs_config_has_lfs_filter
+  test_git_lfs_fetch_include_exclude
   test_git_lfs_checkout
 }
 
