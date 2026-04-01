@@ -155,8 +155,8 @@ test_git_lfs_fetch_recent() {
   # 2.3 Every LFS pointer on each recent ref has a cached object on disk
   for ref in "${RECENT_REFS[@]}"; do
     while IFS= read -r line; do
-      marker="${line:13:1}"   # '*' = cached, '-' = pointer only
-      lfs_file="${line:15}"
+      marker="${line:11:1}"   # '*' = cached, '-' = pointer only
+      lfs_file="${line:13}"
       if [[ "$marker" == "*" ]]; then
         pass "[$ref] LFS object cached: $lfs_file"
       else
