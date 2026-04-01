@@ -39,7 +39,7 @@ steps:
             git lfs checkout
 
   - label: "test git lfs fetch with include and exclude filters"
-    command: ./test_git_lfs_checkout.sh . test_include_exclude_checkout
+    command: ./test_git_lfs_checkout.sh . test_fetch_include_exclude_checkout
     plugins:
       - improbable-eng/metahook#v0.4.1:
           environment: |
