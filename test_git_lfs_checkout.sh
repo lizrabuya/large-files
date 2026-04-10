@@ -174,8 +174,8 @@ test_git_lfs_fetch_include_exclude() {
   #   - LFS objects matching src/**  are NOT cached (marker '-')
   #   - LFS objects matching test/** are NOT cached (marker '-')
 
-  local included_pat="bin/"
-  local excluded_pats=("src/" "test/")
+  local included_path="bin/"
+  local excluded_path=("src/" "test/")
 
   local included=0 excluded_cached=0 excluded_ok=0
 
@@ -187,9 +187,9 @@ test_git_lfs_fetch_include_exclude() {
     local is_included=false
     local is_excluded=false
 
-    [[ "$lfs_file" == ${included_pat}* ]] && is_included=true
-    for pat in "${excluded_pats[@]}"; do
-      [[ "$lfs_file" == ${pat}* ]] && is_excluded=true && break
+    [[ "$lfs_file" == ${included_path}* ]] && is_included=true
+    for path in "${excluded_path[@]}"; do
+      [[ "$lfs_file" == ${path}* ]] && is_excluded=true && break
     done
 
     if $is_included; then
@@ -291,7 +291,7 @@ EOF
   test_git_lfs_checkout
 }
 
-test_git_lfs_fetch_include_exclude() {
+test_fetch_include_exclude_checkout() {
   cat <<'EOF'
 steps:
   - command: ...
