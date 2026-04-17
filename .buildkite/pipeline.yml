@@ -67,3 +67,15 @@ steps:
           pre-exit: |
             echo "--- git lfs prune"
             git lfs prune
+
+  - label: "test git lfs pull (default)"
+    command: ./test_git_lfs_checkout.sh . test_git_lfs_pull_default
+    plugins:
+      - improbable-eng/metahook#v0.4.1:
+          environment: |
+            buildkite-agent env set "GIT_LFS_SKIP_SMUDGE=1"
+          post-checkout: |
+            echo "--- git lfs pull"
+            cd $${BUILDKITE_BUILD_CHECKOUT_PATH}
+            git lfs install
+            git lfs pull origin "refs/remotes/origin/$${BUILDKITE_BRANCH}"

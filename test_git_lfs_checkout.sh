@@ -242,6 +242,18 @@ test_git_lfs_fetch_all() {
   integrity_check_lfs_objects
 }
 
+test_git_lfs_pull() {
+  if git lfs pull > /dev/null 2>&1; then
+    pass "git lfs pull completed successfully"
+  else
+    fail "git lfs pull failed"
+  fi
+  # run the same tests as `git lfs fetch + git lfs checkout` to verify pull results in correct checkout
+  test_git_lfs_fetch
+  test_git_lfs_checkout
+}
+
+
 # --- individual test cases ------------------------------------------------------
 
 test_minimal_operation() {
@@ -323,6 +335,20 @@ EOF
   test_git_lfs_checkout
 }
 
+test_git_lfs_pull_default() {
+  cat <<'EOF'
+steps:
+  - command: "build.sh"
+    checkout:
+      lfs:
+        pull: ""
+EOF
+  echo
+
+  test_git_lfs_install_local
+  test_git_lfs_pull
+
+}
 
 cd "$BUILD_DIR"
 
