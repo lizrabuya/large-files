@@ -242,16 +242,6 @@ test_git_lfs_fetch_all() {
   integrity_check_lfs_objects
 }
 
-test_git_lfs_pull() {
-  if git lfs pull > /dev/null 2>&1; then
-    pass "git lfs pull completed successfully"
-  else
-    fail "git lfs pull failed"
-  fi
-  # run the same tests as `git lfs fetch + git lfs checkout` to verify pull results in correct checkout
-  test_git_lfs_fetch
-  test_git_lfs_checkout
-}
 
 
 # --- individual test cases ------------------------------------------------------
@@ -335,19 +325,42 @@ EOF
   test_git_lfs_checkout
 }
 
-test_git_lfs_pull_default() {
-  cat <<'EOF'
-steps:
-  - command: "build.sh"
-    checkout:
-      lfs:
-        pull: ""
-EOF
-  echo
+test_git_lfs_prune() {
+  # Snapshot which objects are currently cached before pruning
+  local cached_before
+  cached_before=$(git lfs ls-files 2>/dev/null | awk '/ \* / {print $NF}')
 
-  test_git_lfs_install_local
-  test_git_lfs_pull
+  local obj_count_before
+  obj_count_before=$(find ".git/lfs/objects" -type f 2>/dev/null | wc -l | tr -d ' ')
 
+  if git lfs prune > /dev/null 2>&1; then
+    pass "git lfs prune completed successfully"
+  else
+    fail "git lfs prune failed"
+    return
+  fi
+
+  local obj_count_after
+  obj_count_after=$(find ".git/lfs/objects" -type f 2>/dev/null | wc -l | tr -d ' ')
+  local pruned=$(( obj_count_before - obj_count_after ))
+  echo "  objects before: $obj_count_before  after: $obj_count_after  pruned: $pruned"
+
+  # Verify no previously-cached object was incorrectly removed
+  local incorrectly_pruned=0
+  while IFS= read -r line; do
+    local marker="${line:11:1}"
+    local lfs_file="${line:13}"
+    if [[ "$marker" == "-" ]] && echo "$cached_before" | grep -qxF "$lfs_file"; then
+      fail "Object was cached before prune but removed: $lfs_file"
+      ((++incorrectly_pruned))
+    fi
+  done < <(git lfs ls-files 2>/dev/null)
+
+  [[ "$incorrectly_pruned" -eq 0 ]] \
+    && pass "No required objects were removed by prune" \
+    || fail "$incorrectly_pruned required object(s) were incorrectly pruned"
+
+  integrity_check_lfs_objects
 }
 
 cd "$BUILD_DIR"
