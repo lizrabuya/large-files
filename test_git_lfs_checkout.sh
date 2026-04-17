@@ -195,9 +195,9 @@ test_git_lfs_fetch_include_exclude() {
     if $is_included; then
       ((++included))
       if [[ "$marker" == "*" ]]; then
-        pass "bin/** object cached: $lfs_file"
+        pass "object cached: $lfs_file"
       else
-        fail "bin/** object NOT cached (should have been fetched): $lfs_file"
+        fail "object NOT cached (should have been fetched): $lfs_file"
       fi
     elif $is_excluded; then
       if [[ "$marker" == "-" ]]; then
