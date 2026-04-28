@@ -1,4 +1,7 @@
 steps:
+  - label: "annotate GIT_LFS_CHECKOUT.md"
+    command: buildkite-agent annotate --style info --context git-lfs-checkout-md < GIT_LFS_CHECKOUT.md
+
   - label: "test minimal/default git lfs operation"
     command: ./test_git_lfs_checkout.sh . test_minimal_operation
     plugins:
