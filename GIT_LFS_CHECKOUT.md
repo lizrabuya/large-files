@@ -446,7 +446,6 @@ git lfs prune
 | `git lfs prune` | Warn only, continue build | `"git lfs prune failed: <err>"` | Prune is cleanup; failure leaves stale cached objects but does not affect build correctness |
 
 
-
 ---
 
 ## Agent Codebase Integration Points
@@ -641,3 +640,173 @@ Add unit and integration tests covering:
 - LFS fetch with no filters, with `include`, with `exclude`, and with both
 - LFS prune in teardown when `prune: true`
 - Interaction with submodule-enabled repos
+
+
+---
+
+## Go-pipeline Codebase Changes
+
+#### `step_command_checkout.go`
+
+Define three new structs to model the `checkout.lfs` YAML block. All three structs carry
+`RemainingFields` so that unknown keys survive an unmarshal/marshal round-trip.
+
+```go
+// Checkout models the checkout settings for a command step.
+type Checkout struct {
+    LFS             *LFS           `yaml:"lfs,omitempty"`
+    RemainingFields map[string]any `yaml:",inline"`
+}
+
+// LFS models the lfs block inside a checkout block.
+type LFS struct {
+    Prune           bool           `yaml:"prune,omitempty"`
+    Fetch           *LFSFetch      `yaml:"fetch,omitempty"`
+    RemainingFields map[string]any `yaml:",inline"`
+}
+
+// LFSFetch models the fetch block inside an lfs block.
+type LFSFetch struct {
+    Include         string         `yaml:"include,omitempty"`
+    Exclude         string         `yaml:"exclude,omitempty"`
+    RemainingFields map[string]any `yaml:",inline"`
+}
+```
+
+**Pointer semantics** (`*LFS`, `*LFSFetch`) correctly model the proposal's presence/absence
+distinction:
+- `lfs:` absent → `Checkout.LFS == nil` (LFS disabled)
+- `lfs: {}` present but empty → `Checkout.LFS != nil`, all fields zero (LFS enabled with defaults)
+- `fetch:` absent → `LFS.Fetch == nil` (no path filtering)
+
+Since `Checkout`, `LFS`, and `LFSFetch` are always maps (never a scalar or array), none need a
+custom `UnmarshalOrdered`. The `ordered` package's default struct unmarshaling handles nested
+structs and `yaml:",inline"` maps automatically.
+
+Because `encoding/json` has no concept of `inline`, each struct needs a `MarshalJSON` method
+calling `inlineFriendlyMarshalJSON` — the same pattern used by `Cache`. Compile-time interface
+assertions should guard this:
+
+```go
+var _ interface {
+    json.Marshaler
+} = (*Checkout)(nil)
+```
+
+`install_scope` is **not** a field in any of these structs. The design doc is explicit that the
+agent always runs `git lfs install --local` and does not expose an `install_scope` option.
+
+---
+
+#### `step_command_checkout_test.go`
+
+Tests should cover both marshal (struct → JSON) and unmarshal (ordered map → struct) directions,
+following the same pattern as `step_command_cache_test.go`.
+
+#### Proposed test cases — assessment
+
+| Proposed case | Assessment |
+|---|---|
+| empty (`lfs: {}`) | ✓ correct — tests non-nil `*LFS` with all zero values |
+| lfs with fetch only | ✓ correct — tests `Fetch != nil`, `Prune == false` |
+| lfs with all fields | ✓ correct — tests prune + fetch.include + fetch.exclude together |
+| **install_scope only** | **✗ wrong** — `install_scope` is not a field in the proposal; remove this case |
+| extra fields passthrough | ✓ correct — tests `RemainingFields` on `LFS` and `LFSFetch` |
+
+Replace `install_scope only` with **`prune: true` only** (no `fetch:` block), which covers the
+meaningful gap: `Prune` set, `Fetch == nil`.
+
+#### Complete recommended test matrix
+
+| Case | What it exercises |
+|---|---|
+| `lfs:` absent | `Checkout.LFS == nil` |
+| `lfs: {}` | `LFS != nil`, all zero values — LFS enabled with defaults |
+| `lfs: {prune: true}` | `Prune` set, `Fetch == nil` |
+| `lfs: {fetch: {include: "..."}}` | `Fetch` present, include only |
+| `lfs: {fetch: {exclude: "..."}}` | `Fetch` present, exclude only |
+| all fields | `prune: true` + `fetch.include` + `fetch.exclude` |
+| extra fields in `lfs:` | `LFS.RemainingFields` populated |
+| extra fields in `fetch:` | `LFSFetch.RemainingFields` populated |
+
+---
+
+## Pipeline-schema Codebase Changes
+
+### `schema.json`
+
+Two changes were made:
+
+**1. New `checkout` definition** added to the `definitions` section (alphabetically after `cancelOnBuildFailing`):
+
+```json
+"checkout": {
+  "type": "object",
+  "description": "Git checkout configuration for the step",
+  "properties": {
+    "lfs": {
+      "description": "Git LFS configuration. An empty block (or null) enables LFS with all defaults.",
+      "anyOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "properties": {
+            "prune": {
+              "type": "boolean",
+              "description": "Run git lfs prune in the pre-exit phase",
+              "default": false
+            },
+            "fetch": {
+              "type": "object",
+              "description": "Path filtering for git lfs fetch",
+              "properties": {
+                "include": {
+                  "type": "string",
+                  "description": "Path pattern passed as --include to git lfs fetch",
+                  "examples": ["assets/models/**"]
+                },
+                "exclude": {
+                  "type": "string",
+                  "description": "Path pattern passed as --exclude to git lfs fetch",
+                  "examples": ["assets/legacy/**"]
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "additionalProperties": false
+}
+```
+
+**2. `checkout` property added to `commandStep`** (between `cancel_on_build_failing` and `command`):
+
+```json
+"checkout": {
+  "$ref": "#/definitions/checkout"
+}
+```
+
+### `test/valid-pipelines/checkout.yml`
+
+New fixture file covering:
+- `lfs: {}` — empty object (LFS enabled, all defaults)
+- `lfs: ~` — null value (equivalent to empty block)
+- `lfs: {prune: true}` — prune only
+- `lfs: {prune: false, fetch: {include: "...", exclude: "..."}}` — all fields
+- `lfs: {fetch: {include: "..."}}` — include filter only
+- `lfs: {fetch: {exclude: "..."}}` — exclude filter only
+
+### `test/schema.test.js`
+
+New test case added:
+
+```js
+it("should validate checkout with lfs", function() {
+  validate("checkout.yml");
+});
+```
