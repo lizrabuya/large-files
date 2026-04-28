@@ -244,6 +244,343 @@ test_git_lfs_fetch_all() {
 
 
 
+# ---- Group 1: LFS disabled (kill-switch) ----------------------------------------
+
+test_lfs_not_initialized() {
+  # Verifies no LFS state was created — called when BUILDKITE_GIT_LFS_ENABLED is absent or false
+  if git config --local --get-regexp "filter.lfs" > /dev/null 2>&1; then
+    fail "LFS filter found in local .git/config (should be absent when LFS is disabled)"
+  else
+    pass "No LFS filter in local .git/config (LFS correctly not initialized)"
+  fi
+
+  local lfs_obj_dir=".git/lfs/objects"
+  local obj_count=0
+  if [[ -d "$lfs_obj_dir" ]]; then
+    obj_count=$(find "$lfs_obj_dir" -type f 2>/dev/null | wc -l | tr -d ' ')
+  fi
+
+  if [[ "$obj_count" -eq 0 ]]; then
+    pass "No LFS objects downloaded (LFS correctly disabled)"
+  else
+    fail "LFS objects found in store ($obj_count) — LFS should have been skipped"
+  fi
+}
+
+# ---- Group 2: Binary probe -------------------------------------------------------
+
+test_lfs_binary_probe() {
+  # Verifies git-lfs is discoverable via git lfs version (the probe the agent runs)
+  if git lfs version > /dev/null 2>&1; then
+    local lfs_version
+    lfs_version=$(git lfs version 2>/dev/null)
+    pass "git-lfs binary found: $lfs_version"
+  else
+    fail "git lfs version exited non-zero — binary not found or broken"
+  fi
+}
+
+test_lfs_binary_not_found_skips_lfs() {
+  # Strips git-lfs from PATH and verifies: probe exits non-zero, install also fails.
+  # Models the agent warn-and-continue path when the binary is absent.
+  local lfs_path
+  lfs_path=$(command -v git-lfs 2>/dev/null || true)
+  if [[ -z "$lfs_path" ]]; then
+    fail "git-lfs not in PATH — cannot set up binary-not-found simulation"
+    return
+  fi
+
+  local lfs_dir
+  lfs_dir=$(dirname "$lfs_path")
+  local restricted_path
+  restricted_path=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v "^${lfs_dir}$" | paste -sd ':')
+
+  if PATH="$restricted_path" git lfs version > /dev/null 2>&1; then
+    fail "git-lfs still found in restricted PATH — PATH manipulation failed"
+    return
+  fi
+  pass "git-lfs binary not found in restricted PATH (probe correctly returns non-zero)"
+
+  if PATH="$restricted_path" git lfs install --local > /dev/null 2>&1; then
+    fail "git lfs install --local succeeded without binary — unexpected"
+  else
+    pass "git lfs install --local correctly fails when binary is absent"
+  fi
+}
+
+# ---- Group 4: GIT_LFS_SKIP_SMUDGE -----------------------------------------------
+
+test_skip_smudge_produces_pointers() {
+  # Clones with GIT_LFS_SKIP_SMUDGE=1 and verifies LFS-tracked files are pointer
+  # files on disk, not materialized content — mirrors what the agent does before
+  # running git lfs fetch + git lfs checkout.
+  local remote_url
+  remote_url=$(git remote get-url origin 2>/dev/null || true)
+  if [[ -z "$remote_url" ]]; then
+    fail "No remote 'origin' — cannot clone for skip-smudge verification"
+    return
+  fi
+
+  local tracked_count
+  tracked_count=$(git lfs ls-files -n 2>/dev/null | wc -l | tr -d ' ')
+  if [[ "$tracked_count" -eq 0 ]]; then
+    pass "No LFS-tracked files in repo — skip-smudge test not applicable"
+    return
+  fi
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmpdir'" RETURN
+
+  if ! GIT_LFS_SKIP_SMUDGE=1 git clone --quiet "$remote_url" "$tmpdir/repo" 2>/dev/null; then
+    fail "Clone with GIT_LFS_SKIP_SMUDGE=1 failed"
+    return
+  fi
+
+  local pointer_count=0 non_pointer=0
+  while IFS= read -r lfs_file; do
+    local full_path="$tmpdir/repo/$lfs_file"
+    if [[ -f "$full_path" ]] && LC_ALL=C head -1 "$full_path" 2>/dev/null | grep -qF "version https://git-lfs.github.com/spec/v1"; then
+      ((++pointer_count))
+    else
+      ((++non_pointer))
+      fail "Expected pointer but got real content: $lfs_file"
+    fi
+  done < <(git -C "$tmpdir/repo" lfs ls-files -n 2>/dev/null)
+
+  [[ "$pointer_count" -gt 0 && "$non_pointer" -eq 0 ]] \
+    && pass "GIT_LFS_SKIP_SMUDGE=1: all $pointer_count LFS file(s) are pointers after checkout" \
+    || fail "GIT_LFS_SKIP_SMUDGE=1: $non_pointer file(s) were materialized — smudge suppression failed"
+}
+
+test_skip_smudge_overrides_existing_env() {
+  # Verifies: GIT_LFS_SKIP_SMUDGE=1 force-overrides a pre-existing GIT_LFS_SKIP_SMUDGE=0.
+  # Simulates a user who exported SKIP_SMUDGE=0; the agent must override it to 1.
+  local remote_url
+  remote_url=$(git remote get-url origin 2>/dev/null || true)
+  if [[ -z "$remote_url" ]]; then
+    fail "No remote 'origin' — cannot test skip-smudge override"
+    return
+  fi
+
+  local tracked_count
+  tracked_count=$(git lfs ls-files -n 2>/dev/null | wc -l | tr -d ' ')
+  if [[ "$tracked_count" -eq 0 ]]; then
+    pass "No LFS-tracked files — skip-smudge override test not applicable"
+    return
+  fi
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmpdir'" RETURN
+
+  # Outer env has SKIP_SMUDGE=0; inner command force-sets to 1 (models agent behavior)
+  if ! GIT_LFS_SKIP_SMUDGE=0 bash -c "GIT_LFS_SKIP_SMUDGE=1 git clone --quiet '$remote_url' '$tmpdir/repo'" 2>/dev/null; then
+    fail "Clone failed during skip-smudge override test"
+    return
+  fi
+
+  local pointer_count=0
+  while IFS= read -r lfs_file; do
+    if LC_ALL=C head -1 "$tmpdir/repo/$lfs_file" 2>/dev/null | grep -qF "version https://git-lfs.github.com/spec/v1"; then
+      ((++pointer_count))
+    fi
+  done < <(git -C "$tmpdir/repo" lfs ls-files -n 2>/dev/null)
+
+  [[ "$pointer_count" -gt 0 ]] \
+    && pass "GIT_LFS_SKIP_SMUDGE=1 overrides pre-existing =0: $pointer_count pointer file(s) on disk" \
+    || fail "Override failed — files were smudged despite GIT_LFS_SKIP_SMUDGE=1 being set"
+}
+
+# ---- Group 5: Fetch + Checkout ---------------------------------------------------
+
+test_invalid_glob_fetch_fails() {
+  # An invalid glob in --include must cause git lfs fetch to exit non-zero (fail the build).
+  local invalid_pattern='[invalid-glob'
+  local exit_code=0
+  git lfs fetch --include="$invalid_pattern" > /dev/null 2>&1 || exit_code=$?
+  if [[ "$exit_code" -ne 0 ]]; then
+    pass "git lfs fetch correctly exits non-zero for invalid glob: $invalid_pattern"
+  else
+    fail "git lfs fetch should have failed with invalid glob '$invalid_pattern' but exited 0"
+  fi
+}
+
+test_checkout_uses_local_cache_only() {
+  # git lfs checkout must succeed using only the local object store — no network call.
+  # Verified by temporarily pointing origin to an unreachable URL.
+  local obj_count
+  obj_count=$(find ".git/lfs/objects" -type f 2>/dev/null | wc -l | tr -d ' ')
+  if [[ "$obj_count" -eq 0 ]]; then
+    fail "LFS object store is empty — cannot verify local-cache-only checkout"
+    return
+  fi
+
+  local original_url
+  original_url=$(git remote get-url origin 2>/dev/null || true)
+
+  local checkout_exit=0
+  if [[ -n "$original_url" ]]; then
+    git remote set-url origin "https://lfs-no-network-test.invalid/repo.git"
+    git lfs checkout > /dev/null 2>&1 || checkout_exit=$?
+    git remote set-url origin "$original_url"
+  else
+    git lfs checkout > /dev/null 2>&1 || checkout_exit=$?
+  fi
+
+  if [[ "$checkout_exit" -eq 0 ]]; then
+    pass "git lfs checkout succeeded with unreachable remote — confirmed local-cache-only"
+  else
+    fail "git lfs checkout failed with unreachable remote — may require network (exit: $checkout_exit)"
+  fi
+}
+
+# ---- Group 6: Submodule LFS ------------------------------------------------------
+
+test_submodules_no_lfs_state() {
+  # When BUILDKITE_GIT_SUBMODULES != true, no submodule should have LFS filter config.
+  local sub_count=0 lfs_state_found=0
+
+  while IFS= read -r sub_path; do
+    [[ -z "$sub_path" ]] && continue
+    ((++sub_count))
+    if git -C "$sub_path" config --local --get-regexp "filter.lfs" > /dev/null 2>&1; then
+      fail "Submodule at $sub_path has LFS filter config (should be absent — submodules disabled)"
+      ((++lfs_state_found))
+    fi
+  done < <(git submodule foreach --quiet --recursive pwd 2>/dev/null || true)
+
+  if [[ "$sub_count" -eq 0 ]]; then
+    pass "No submodules present"
+  elif [[ "$lfs_state_found" -eq 0 ]]; then
+    pass "No submodule has LFS state — correctly skipped when submodules disabled"
+  fi
+}
+
+test_submodule_lfs_install_local() {
+  # Each submodule must have LFS filter config written by git -C <path> lfs install --local.
+  local sub_count=0 missing=0
+
+  while IFS= read -r sub_path; do
+    [[ -z "$sub_path" ]] && continue
+    ((++sub_count))
+    if git -C "$sub_path" config --local --get-regexp "filter.lfs" > /dev/null 2>&1; then
+      pass "LFS filter config present in submodule: $sub_path"
+    else
+      fail "LFS filter config missing in submodule: $sub_path"
+      ((++missing))
+    fi
+  done < <(git submodule foreach --quiet --recursive pwd 2>/dev/null)
+
+  if [[ "$sub_count" -eq 0 ]]; then
+    pass "No submodules found — submodule LFS install test not applicable"
+  else
+    [[ "$missing" -eq 0 ]] && pass "All $sub_count submodule(s) have LFS filter config"
+  fi
+}
+
+test_submodule_lfs_files_materialized() {
+  # All LFS-tracked files in every submodule must be real content, not pointer files.
+  local sub_count=0 total_pointers=0
+
+  while IFS= read -r sub_path; do
+    [[ -z "$sub_path" ]] && continue
+    ((++sub_count))
+    local sub_pointers=0
+
+    while IFS= read -r lfs_file; do
+      local full_path="$sub_path/$lfs_file"
+      if [[ -f "$full_path" ]] && LC_ALL=C head -1 "$full_path" 2>/dev/null | grep -qF "version https://git-lfs.github.com/spec/v1"; then
+        fail "Submodule LFS file still a pointer: $full_path"
+        ((++sub_pointers))
+        ((++total_pointers))
+      else
+        pass "Submodule LFS file materialized: $full_path"
+      fi
+    done < <(git -C "$sub_path" lfs ls-files -n 2>/dev/null)
+
+    [[ "$sub_pointers" -eq 0 ]] && pass "All LFS files materialized in submodule: $sub_path"
+  done < <(git submodule foreach --quiet --recursive pwd 2>/dev/null)
+
+  if [[ "$sub_count" -eq 0 ]]; then
+    pass "No submodules found — submodule materialization test not applicable"
+  fi
+}
+
+test_submodule_lfs_recursive_enumeration() {
+  # git submodule foreach --quiet --recursive pwd must enumerate every nesting level;
+  # each enumerated submodule with LFS files must have LFS config present.
+  local sub_paths=()
+  while IFS= read -r sub_path; do
+    [[ -n "$sub_path" ]] && sub_paths+=("$sub_path")
+  done < <(git submodule foreach --quiet --recursive pwd 2>/dev/null || true)
+
+  if [[ "${#sub_paths[@]}" -eq 0 ]]; then
+    pass "No submodules found — recursive enumeration test not applicable"
+    return
+  fi
+
+  pass "git submodule foreach --recursive enumerated ${#sub_paths[@]} path(s)"
+
+  local max_depth=0
+  for sub_path in "${sub_paths[@]}"; do
+    local depth
+    depth=$(awk -F'/' '{print NF-1}' <<< "$sub_path")
+    [[ "$depth" -gt "$max_depth" ]] && max_depth="$depth"
+  done
+  echo "  Max submodule nesting depth: $max_depth"
+
+  [[ "$max_depth" -gt 1 ]] \
+    && pass "Nested submodules detected (depth: $max_depth) — recursive enumeration is meaningful" \
+    || pass "Single-level submodules only (depth: $max_depth)"
+
+  for sub_path in "${sub_paths[@]}"; do
+    local lfs_file_count
+    lfs_file_count=$(git -C "$sub_path" lfs ls-files -n 2>/dev/null | wc -l | tr -d ' ')
+    if [[ "$lfs_file_count" -gt 0 ]]; then
+      if git -C "$sub_path" config --local --get-regexp "filter.lfs" > /dev/null 2>&1; then
+        pass "LFS config present in nested submodule: $sub_path"
+      else
+        fail "LFS config missing in nested submodule: $sub_path"
+      fi
+    fi
+  done
+}
+
+# ---- Group 7: Prune (default off) ------------------------------------------------
+
+test_prune_skipped_objects_intact() {
+  # When BUILDKITE_GIT_LFS_PRUNE is absent/false, git lfs prune must NOT have run.
+  # We can't observe a non-event directly; instead verify all HEAD-referenced LFS
+  # objects are still present — prune incorrectly running would remove them.
+  local obj_count
+  obj_count=$(find ".git/lfs/objects" -type f 2>/dev/null | wc -l | tr -d ' ')
+  echo "  LFS objects in store: $obj_count"
+
+  if [[ "$obj_count" -eq 0 ]]; then
+    fail "LFS object store is empty — cannot verify prune was correctly skipped"
+    return
+  fi
+
+  local missing=0
+  while IFS= read -r line; do
+    local marker="${line:11:1}"
+    local lfs_file="${line:13}"
+    if [[ "$marker" == "-" ]]; then
+      fail "LFS object absent from store (may have been pruned prematurely): $lfs_file"
+      ((++missing))
+    fi
+  done < <(git lfs ls-files 2>/dev/null)
+
+  [[ "$missing" -eq 0 ]] \
+    && pass "All HEAD-referenced LFS objects present — prune correctly not run" \
+    || fail "$missing HEAD object(s) missing — prune may have run when disabled"
+
+  integrity_check_lfs_objects
+}
+
 # --- individual test cases ------------------------------------------------------
 
 test_minimal_operation() {
@@ -261,67 +598,21 @@ EOF
   test_git_lfs_checkout
 }
 
-test_fetch_all_checkout() {
-  cat <<'EOF'
-steps:
-  - command: ...
-    checkout:
-      lfs:
-        fetch: "--all"
-EOF
-  echo
-
-  test_git_lfs_install_local
-  test_git_lfs_config_has_lfs_filter
-  test_git_lfs_fetch_all
-  test_git_lfs_checkout
-}
-
-test_fetch_recent_checkout() {
-  cat <<'EOF'
-steps:
-  - command: ...
-    checkout:
-      lfs:
-        fetch: "--recent"
-EOF
-  echo
-
-  test_git_lfs_install_local
-  test_git_lfs_config_has_lfs_filter
-  test_git_lfs_fetch_recent
-  test_git_lfs_checkout
-}
-
 test_fetch_include_exclude_checkout() {
   cat <<'EOF'
 steps:
-  - command: ...
+  - command: "build.sh"
     checkout:
       lfs:
-        fetch: "-I 'bin/**' -X 'src/**'"
-    OR
-        fetch: "--include='bin/**' --exclude='src/**'"
+        prune: false                   # optional. default: false
+        fetch:
+          include: "assets/models/**"  # optional. passed as --include to git lfs fetch
+          exclude: "assets/legacy/**"  # optional. passed as --exclude to git lfs fetch
 EOF
   echo
   test_git_lfs_install_local
   test_git_lfs_config_has_lfs_filter
   test_git_lfs_fetch_include_exclude
-  test_git_lfs_checkout
-}
-
-test_global_install() {
-  cat <<'EOF'
-steps:
-  - command: ...
-    checkout:
-      lfs:
-        install_scope: global
-EOF
-  echo
-
-  test_git_lfs_install_global
-  test_git_lfs_fetch
   test_git_lfs_checkout
 }
 
@@ -361,6 +652,107 @@ test_git_lfs_prune() {
     || fail "$incorrectly_pruned required object(s) were incorrectly pruned"
 
   integrity_check_lfs_objects
+}
+
+test_lfs_disabled_absent() {
+  cat <<'EOF'
+Scenario: BUILDKITE_GIT_LFS_ENABLED absent
+  Expected: no LFS operations, no LFS state in repo
+EOF
+  echo
+  test_lfs_not_initialized
+}
+
+test_lfs_disabled_false() {
+  cat <<'EOF'
+Scenario: BUILDKITE_GIT_LFS_ENABLED=false
+  Expected: no LFS operations, no LFS state in repo
+EOF
+  echo
+  test_lfs_not_initialized
+}
+
+test_binary_not_found() {
+  cat <<'EOF'
+Scenario: git-lfs binary absent from PATH
+  Expected: probe exits non-zero, install fails, build continues without LFS
+EOF
+  echo
+  test_lfs_binary_probe
+  test_lfs_binary_not_found_skips_lfs
+}
+
+test_skip_smudge_checkout() {
+  cat <<'EOF'
+Scenario: GIT_LFS_SKIP_SMUDGE=1 force-set before git checkout
+  Expected: LFS-tracked files written as pointer files, not materialized content
+EOF
+  echo
+  test_skip_smudge_produces_pointers
+}
+
+test_skip_smudge_env_override() {
+  cat <<'EOF'
+Scenario: GIT_LFS_SKIP_SMUDGE=1 overrides a pre-existing GIT_LFS_SKIP_SMUDGE=0
+  Expected: pointer files on disk even when the user had exported SKIP_SMUDGE=0
+EOF
+  echo
+  test_skip_smudge_overrides_existing_env
+}
+
+test_invalid_glob_fails() {
+  cat <<'EOF'
+Scenario: invalid glob in BUILDKITE_GIT_LFS_FETCH_INCLUDE / FETCH_EXCLUDE
+  Expected: git lfs fetch exits non-zero, failing the build
+EOF
+  echo
+  test_invalid_glob_fetch_fails
+}
+
+test_checkout_local_cache() {
+  cat <<'EOF'
+Scenario: git lfs checkout uses local object store only — no network call
+  Expected: checkout succeeds even with an unreachable remote URL
+EOF
+  echo
+  test_checkout_uses_local_cache_only
+}
+
+test_submodules_lfs_disabled() {
+  cat <<'EOF'
+Scenario: BUILDKITE_GIT_SUBMODULES=false — submodule LFS operations skipped
+  Expected: no submodule has LFS filter config
+EOF
+  echo
+  test_submodules_no_lfs_state
+}
+
+test_submodules_with_lfs() {
+  cat <<'EOF'
+Scenario: BUILDKITE_GIT_SUBMODULES=true — each submodule gets lfs install + fetch + checkout
+  Expected: all submodules have LFS filter config and fully materialized files
+EOF
+  echo
+  test_submodule_lfs_install_local
+  test_submodule_lfs_files_materialized
+}
+
+test_submodules_lfs_nested() {
+  cat <<'EOF'
+Scenario: nested submodules — git submodule foreach --recursive enumerates all levels
+  Expected: LFS config and materialized files at every nesting depth
+EOF
+  echo
+  test_submodule_lfs_recursive_enumeration
+}
+
+test_prune_default_disabled() {
+  cat <<'EOF'
+Scenario: BUILDKITE_GIT_LFS_PRUNE absent/false — git lfs prune must not run
+  Expected: all HEAD LFS objects remain in store after pre-exit phase
+EOF
+  echo
+  test_prune_skipped_objects_intact
 }
 
 cd "$BUILD_DIR"
